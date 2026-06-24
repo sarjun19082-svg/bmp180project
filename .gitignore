@@ -1,0 +1,21 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database files
+*.db
+readings.db
+
+# Log files
+*.log
+
+# Spreadsheet / local data files (if generated)
+*.csv
+*.xlsx

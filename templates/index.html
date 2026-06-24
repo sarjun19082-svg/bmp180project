@@ -1,0 +1,309 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Pi Sensor Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 850px; margin: 2rem auto; padding: 0 1rem; color: #333; }
+        h1 { color: #1F3A5F; margin-bottom: 1.5rem; }
+        .control-panel { background: #f5f7fa; padding: 1rem; border-radius: 8px; margin-bottom: 2rem; display: flex; align-items: center; }
+        button { font-size: 1rem; padding: 0.6rem 1.2rem; margin-right: 0.5rem; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; font-weight: 500; }
+        #startBtn { background: #2E7D32; color: white; border: none; }
+        #startBtn:hover { background: #225e25; }
+        #stopBtn { background: #C62828; color: white; border: none; }
+        #stopBtn:hover { background: #961e1e; }
+        #clearBtn { background: #FF9800; color: white; border: none; }
+        #clearBtn:hover { background: #e68a00; }
+        #status { margin-left: 1rem; font-weight: bold; padding: 0.3rem 0.6rem; border-radius: 4px; background: #e0e0e0; }
+        .status-recording { background: #e8f5e9 !important; color: #2E7D32; }
+        .status-idle { background: #ffebee !important; color: #C62828; }
+        .chart-container { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1rem; margin-bottom: 2rem; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .chart-title { font-size: 1.1rem; color: #1F3A5F; margin-top: 0; margin-bottom: 1rem; font-weight: 600; }
+        canvas { display: block; margin: 0 auto; }
+        .bookmarks-section { background: #fffde7; border: 1px solid #fff59d; border-radius: 8px; padding: 1.2rem; }
+        .bookmarks-title { font-size: 1.1rem; color: #f57f17; margin-top: 0; margin-bottom: 0.8rem; font-weight: 600; }
+        #bookmarksList { list-style-type: none; padding-left: 0; margin: 0; max-height: 200px; overflow-y: auto; }
+        #bookmarksList li { padding: 0.4rem 0.6rem; border-bottom: 1px solid #fff9c4; font-size: 0.95rem; }
+        #bookmarksList li:last-child { border-bottom: none; }
+        .highlight-alert { color: #d32f2f; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Pi Sensor Dashboard</h1>
+    
+    <div class="control-panel">
+        <button id="startBtn">Start recording</button>
+        <button id="stopBtn">Stop recording</button>
+        <button id="clearBtn">Clear data</button>
+        Status: <span id="status">idle</span>
+    </div>
+
+    <!-- Main Readings Chart -->
+    <div class="chart-container">
+        <div class="chart-title">Real-time Readings (Temperature & Pressure)</div>
+        <canvas id="chart" width="800" height="300"></canvas>
+    </div>
+
+    <!-- Humidity Readings Chart -->
+    <div class="chart-container">
+        <div class="chart-title">Humidity Readings (DHT11 Sensor)</div>
+        <canvas id="humidityChart" width="800" height="220"></canvas>
+    </div>
+
+    <!-- Temperature Deviation Chart -->
+    <div class="chart-container">
+        <div class="chart-title">Temperature Deviation (Current Temp - Avg of Last 5)</div>
+        <canvas id="tempDevChart" width="800" height="220"></canvas>
+    </div>
+
+    <!-- Pressure Deviation Chart -->
+    <div class="chart-container">
+        <div class="chart-title">Pressure Deviation (Current Press - Avg of Last 5)</div>
+        <canvas id="pressDevChart" width="800" height="220"></canvas>
+    </div>
+
+    <!-- Bookmarks/Alerts Section -->
+    <div class="bookmarks-section">
+        <div class="bookmarks-title">⚠️ Bookmarks / Outliers (Deviation > 0.5)</div>
+        <ul id="bookmarksList">
+            <li>No anomalies detected yet.</li>
+        </ul>
+    </div>
+
+    <script>
+        // 1. Setup Main Chart (BMP180 Temp & Pressure)
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: { 
+                labels: [], 
+                datasets: [
+                    { 
+                        label: 'Temperature (°C)', 
+                        data: [], 
+                        borderColor: '#2E75B6', 
+                        tension: 0.2 
+                    },
+                    { 
+                        label: 'Pressure (hPa)', 
+                        data: [], 
+                        borderColor: '#B06E2E', 
+                        tension: 0.2, 
+                        yAxisID: 'y1' 
+                    }
+                ] 
+            },
+            options: {
+                responsive: false,
+                scales: {
+                    y: { 
+                        position: 'left', 
+                        title: { display: true, text: '°C' } 
+                    },
+                    y1: { 
+                        position: 'right', 
+                        title: { display: true, text: 'hPa' }, 
+                        grid: { drawOnChartArea: false } 
+                    }
+                }
+            }
+        });
+
+        // 2. Setup Humidity Chart (DHT11)
+        const humCtx = document.getElementById('humidityChart').getContext('2d');
+        const humidityChart = new Chart(humCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Humidity (%)',
+                    data: [],
+                    borderColor: '#4CAF50', // Green line for humidity
+                    tension: 0.2,
+                    fill: false
+                }]
+            },
+            options: {
+                responsive: false,
+                scales: {
+                    y: { 
+                        title: { display: true, text: '%' },
+                        min: 0,
+                        max: 100
+                    }
+                }
+            }
+        });
+
+        // Helper function to create deviation dataset configuration
+        const createDevDataset = (label, color) => ({
+            label: label,
+            data: [],
+            borderColor: color,
+            tension: 0.2,
+            pointBackgroundColor: (context) => {
+                const index = context.dataIndex;
+                const val = context.dataset.data[index];
+                return Math.abs(val) > 0.5 ? '#C62828' : color;
+            },
+            pointBorderColor: (context) => {
+                const index = context.dataIndex;
+                const val = context.dataset.data[index];
+                return Math.abs(val) > 0.5 ? '#C62828' : color;
+            },
+            pointRadius: (context) => {
+                const index = context.dataIndex;
+                const val = context.dataset.data[index];
+                return Math.abs(val) > 0.5 ? 6 : 3;
+            }
+        });
+
+        // 3. Setup Temperature Deviation Chart
+        const tempCtx = document.getElementById('tempDevChart').getContext('2d');
+        const tempDevChart = new Chart(tempCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [createDevDataset('Temperature Deviation (°C)', '#2E75B6')]
+            },
+            options: {
+                responsive: false,
+                scales: {
+                    y: { title: { display: true, text: 'Deviation (°C)' } }
+                }
+            }
+        });
+
+        // 4. Setup Pressure Deviation Chart
+        const pressCtx = document.getElementById('pressDevChart').getContext('2d');
+        const pressDevChart = new Chart(pressCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [createDevDataset('Pressure Deviation (hPa)', '#B06E2E')]
+            },
+            options: {
+                responsive: false,
+                scales: {
+                    y: { title: { display: true, text: 'Deviation (hPa)' } }
+                }
+            }
+        });
+
+        async function refresh() {
+            const r = await fetch('/data');
+            const rows = await r.json();
+            
+            const timeLabels = rows.map(x => x.ts.split('T')[1].split('.')[0]);
+            
+            // Extract core data
+            const temps = rows.map(x => x.temperature_c);
+            const pressures = rows.map(x => x.pressure_hpa);
+            const humidities = rows.map(x => x.humidity);
+            
+            const tempDevs = [];
+            const pressDevs = [];
+            const anomalies = [];
+
+            // Calculate moving averages and deviations
+            for (let i = 0; i < rows.length; i++) {
+                if (i >= 4) {
+                    const lastFiveTemps = temps.slice(i-4, i+1);
+                    const lastFivePress = pressures.slice(i-4, i+1);
+                    
+                    const avgTemp = lastFiveTemps.reduce((a, b) => a + b, 0) / 5;
+                    const avgPress = lastFivePress.reduce((a, b) => a + b, 0) / 5;
+                    
+                    const tempDev = temps[i] - avgTemp;
+                    const pressDev = pressures[i] - avgPress;
+                    
+                    tempDevs.push(Number(tempDev.toFixed(2)));
+                    pressDevs.push(Number(pressDev.toFixed(2)));
+
+                    // Record anomaly if deviation is greater than 0.5 (absolute value)
+                    if (Math.abs(tempDev) > 0.5) {
+                        anomalies.push({
+                            time: timeLabels[i],
+                            type: 'Temperature',
+                            value: temps[i],
+                            avg: avgTemp.toFixed(2),
+                            dev: (tempDev > 0 ? '+' : '') + tempDev.toFixed(2)
+                        });
+                    }
+                    if (Math.abs(pressDev) > 0.5) {
+                        anomalies.push({
+                            time: timeLabels[i],
+                            type: 'Pressure',
+                            value: pressures[i],
+                            avg: avgPress.toFixed(2),
+                            dev: (pressDev > 0 ? '+' : '') + pressDev.toFixed(2)
+                        });
+                    }
+                } else {
+                    // Start rows (< 5 readings) have no dev data
+                    tempDevs.push(0);
+                    pressDevs.push(0);
+                }
+            }
+
+            // Update Main Chart
+            chart.data.labels = timeLabels;
+            chart.data.datasets[0].data = temps;
+            chart.data.datasets[1].data = pressures;
+            chart.update();
+            
+            // Update Humidity Chart (DHT11)
+            humidityChart.data.labels = timeLabels;
+            humidityChart.data.datasets[0].data = humidities;
+            humidityChart.update();
+
+            // Update Temp Deviation Chart
+            tempDevChart.data.labels = timeLabels;
+            tempDevChart.data.datasets[0].data = tempDevs;
+            tempDevChart.update();
+
+            // Update Press Deviation Chart
+            pressDevChart.data.labels = timeLabels;
+            pressDevChart.data.datasets[0].data = pressDevs;
+            pressDevChart.update();
+
+            // Update Bookmarks List at the bottom
+            const listElement = document.getElementById('bookmarksList');
+            listElement.innerHTML = '';
+            
+            if (anomalies.length === 0) {
+                listElement.innerHTML = '<li>No anomalies detected yet (deviations within &plusmn;0.5).</li>';
+            } else {
+                // Show latest anomalies at the top of the list
+                anomalies.reverse().forEach(a => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `[${a.time}] <span class="highlight-alert">${a.type} Anomaly</span>: Deviation of <strong>${a.dev}</strong> (Current: ${a.value}, Avg of Last 5: ${a.avg})`;
+                    listElement.appendChild(li);
+                });
+            }
+            
+            // Update status text
+            const s = await (await fetch('/status')).json();
+            const statusIndicator = document.getElementById('status');
+            statusIndicator.textContent = s.recording ? 'recording' : 'idle';
+            if (s.recording) {
+                statusIndicator.className = 'status-recording';
+            } else {
+                statusIndicator.className = 'status-idle';
+            }
+        }
+
+        document.getElementById('startBtn').onclick = () => fetch('/start', { method: 'POST' }).then(refresh);
+        document.getElementById('stopBtn').onclick = () => fetch('/stop', { method: 'POST' }).then(refresh);
+        document.getElementById('clearBtn').onclick = () => {
+            if (confirm("Are you sure you want to delete all sensor data? This cannot be undone.")) {
+                fetch('/clear', { method: 'POST' }).then(refresh);
+            }
+        };
+
+        setInterval(refresh, 1500);
+        refresh();
+    </script>
+</body>
+</html>

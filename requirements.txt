@@ -1,0 +1,6 @@
+# For CircuitPython option
+adafruit-blinka
+circuitpython-bmp180
+
+# For Legacy option
+# Adafruit-BMP
