@@ -9,6 +9,19 @@ import sensor
 app = Flask(__name__)
 DB_PATH = "readings.db"
 
+# Initialize GPIO Pin for Anomaly Signal (GPIO 17 / Pin 11 on header)
+# Wrapped in try/except so it doesn't crash if run on Windows for testing
+try:
+    import board
+    import digitalio
+    anomaly_pin = digitalio.DigitalInOut(board.D17)
+    anomaly_pin.direction = digitalio.Direction.OUTPUT
+    anomaly_pin.value = False
+    print("GPIO Anomaly Pin (GPIO 17) successfully initialized.")
+except Exception as e:
+    print(f"Warning: Could not initialize GPIO Anomaly Pin (this is normal on Windows): {e}")
+    anomaly_pin = None
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     # Create the basic table if it doesn't exist
@@ -44,6 +57,13 @@ def _record_loop():
         try:
             data = sensor.read()
             conn = sqlite3.connect(DB_PATH)
+            
+            # Fetch the last 4 readings to calculate the moving average
+            last_readings = conn.execute(
+                "SELECT temperature_c, pressure_hpa, temperature_dht, humidity FROM readings ORDER BY id DESC LIMIT 4"
+            ).fetchall()
+            
+            # Insert the new reading
             conn.execute(
                 "INSERT INTO readings (ts, temperature_c, pressure_hpa, temperature_dht, humidity) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -56,6 +76,44 @@ def _record_loop():
             )
             conn.commit()
             conn.close()
+            
+            # --- Server-Side Anomaly Detection & GPIO Signal Trigger ---
+            # 1. BMP Temperature Deviation
+            bmp_temps = [r[0] for r in last_readings if r[0] is not None] + [data["temperature_c"]]
+            bmp_temp_avg = sum(bmp_temps) / len(bmp_temps)
+            bmp_temp_dev = abs(data["temperature_c"] - bmp_temp_avg)
+            
+            # 2. BMP Pressure Deviation
+            pressures = [r[1] for r in last_readings if r[1] is not None] + [data["pressure_hpa"]]
+            pressure_avg = sum(pressures) / len(pressures)
+            pressure_dev = abs(data["pressure_hpa"] - pressure_avg)
+
+            # 3. DHT Temperature Deviation
+            dht_temps = [r[2] for r in last_readings if r[2] is not None] + [data["temperatureDHT"]]
+            dht_temp_avg = sum(dht_temps) / len(dht_temps)
+            dht_temp_dev = abs(data["temperatureDHT"] - dht_temp_avg)
+
+            # 4. DHT Humidity Deviation
+            humidities = [r[3] for r in last_readings if r[3] is not None] + [data["humidity"]]
+            humidity_avg = sum(humidities) / len(humidities)
+            humidity_dev = abs(data["humidity"] - humidity_avg)
+            
+            # Trigger signal if any deviation > 0.5 (requires at least 5 baseline readings)
+            has_anomaly = (
+                (len(bmp_temps) >= 5 and bmp_temp_dev > 0.5) or
+                (len(pressures) >= 5 and pressure_dev > 0.5) or
+                (len(dht_temps) >= 5 and dht_temp_dev > 0.5) or
+                (len(humidities) >= 5 and humidity_dev > 0.5)
+            )
+            
+            # Output to GPIO physical pin
+            if anomaly_pin is not None:
+                anomaly_pin.value = has_anomaly
+                if has_anomaly:
+                    print("GPIO Alert: Anomaly detected! GPIO 17 set to HIGH.")
+                else:
+                    anomaly_pin.value = False
+                    
         except Exception as e:
             print("Record error:", e)
         time.sleep(2)
@@ -80,6 +138,9 @@ def stop():
     global _recording
     with _lock:
         _recording = False
+        # Make sure pin turns off if logging is stopped
+        if anomaly_pin is not None:
+            anomaly_pin.value = False
     return jsonify({"status": "stopped"})
 
 @app.route("/status")
@@ -104,7 +165,7 @@ def data():
         } for r in rows
     ])
 
-# New route specifically for DHT11 readings
+# Route for DHT11 readings
 @app.route("/dht11")
 def dht11():
     conn = sqlite3.connect(DB_PATH)
@@ -130,10 +191,7 @@ def table():
     ).fetchall()
     conn.close()
     
-    # Reverse to chronological order (oldest first)
     rows.reverse()
-    
-    # We want to display the last 100 rows in the HTML table
     display_start = max(0, len(rows) - 100)
     
     html = """
@@ -166,7 +224,6 @@ def table():
     for i in range(display_start, len(rows)):
         r = rows[i]
         
-        # Calculate moving average if we have at least 5 readings (i.e. i >= 4)
         if i >= 4:
             last_five_temps = [rows[j][1] for j in range(i-4, i+1)]
             last_five_press = [rows[j][2] for j in range(i-4, i+1)]
@@ -175,10 +232,9 @@ def table():
             avg_temp_str = str(avg_temp)
             avg_press_str = str(avg_press)
         else:
-            avg_temp_str = ""  # Leave blank for starting 4 rows
-            avg_press_str = ""  # Leave blank for starting 4 rows
+            avg_temp_str = ""
+            avg_press_str = ""
             
-        # r[3] is temperature_dht, r[4] is humidity
         html += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td>{avg_temp_str}</td><td>{r[2]}</td><td>{avg_press_str}</td><td>{r[3]}</td><td>{r[4]}</td></tr>"
         
     html += """
@@ -198,5 +254,4 @@ def clear():
     return jsonify({"status": "cleared"})
 
 if __name__ == "__main__":
-    # host="0.0.0.0" makes Flask reachable from other devices on the Wi-Fi
     app.run(host="0.0.0.0", port=5000, debug=False)
